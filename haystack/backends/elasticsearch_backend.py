@@ -128,7 +128,6 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
         if current_mapping != self.existing_mapping:
             try:
                 # Make sure the index is there first.
-                print self.index_settings
                 self.conn.create_index(self.index_name, self.index_settings)
                 self.conn.put_mapping('modelresult', current_mapping, indexes=[self.index_name])
                 self.existing_mapping = current_mapping
