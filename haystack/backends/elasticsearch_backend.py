@@ -101,6 +101,8 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
         self.log = logging.getLogger('haystack')
         self.setup_complete = False
         self.existing_mapping = {}
+        self.index_settings = connection_options.get('INDEX_SETTINGS', self.DEFAULT_SETTINGS)
+        self.search_analyzer = connection_options.get('SEARCH_ANALYZER')
 
     def setup(self):
         """
@@ -126,7 +128,8 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
         if current_mapping != self.existing_mapping:
             try:
                 # Make sure the index is there first.
-                self.conn.create_index(self.index_name, self.DEFAULT_SETTINGS)
+                print self.index_settings
+                self.conn.create_index(self.index_name, self.index_settings)
                 self.conn.put_mapping('modelresult', current_mapping, indexes=[self.index_name])
                 self.existing_mapping = current_mapping
             except Exception, e:
@@ -267,6 +270,12 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
                     },
                 },
             }
+
+        if self.search_analyzer:
+            try:
+                kwargs['query']['filtered']['query']['query_string']['analyzer'] = self.search_analyzer
+            except KeyError:
+                pass #It's a match all so we don't care
 
         if fields:
             if isinstance(fields, (list, set)):
@@ -481,6 +490,7 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
 
         if kwargs.get('end_offset') is not None and kwargs.get('end_offset') > kwargs.get('start_offset', 0):
             query_params['size'] = kwargs.get('end_offset') - kwargs.get('start_offset', 0)
+
 
         try:
             raw_results = self.conn.search(None, search_kwargs, indexes=[self.index_name], doc_types=['modelresult'], **query_params)
