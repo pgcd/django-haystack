@@ -7,15 +7,7 @@ from haystack.query import SearchQuerySet
 from haystack.utils.loading import UnifiedIndex
 from core.models import MockModel
 from core.tests.mocks import MockSearchResult
-
-
-class SimpleMockSearchIndex(indexes.SearchIndex, indexes.Indexable):
-    text = indexes.CharField(document=True, use_template=True)
-    name = indexes.CharField(model_attr='author', faceted=True)
-    pub_date = indexes.DateField(model_attr='pub_date')
-
-    def get_model(self):
-        return MockModel
+from simple_tests.search_indexes import SimpleMockSearchIndex
 
 
 class SimpleSearchBackendTestCase(TestCase):
@@ -118,6 +110,11 @@ class LiveSimpleSearchQuerySetTestCase(TestCase):
         self.assertTrue(len(self.sqs.filter(text='index')) > 0)
         self.assertTrue(len(self.sqs.exclude(name='daniel')) > 0)
         self.assertTrue(len(self.sqs.order_by('-pub_date')) > 0)
+
+    def test_more_like_this(self):
+        # MLT shouldn't be horribly broken. This used to throw an exception.
+        mm1 = MockModel.objects.get(pk=1)
+        self.assertEqual(len(self.sqs.filter(text=1).more_like_this(mm1)), 0)
 
     def test_values_queries(self):
         sqs = self.sqs.auto_query('daniel')

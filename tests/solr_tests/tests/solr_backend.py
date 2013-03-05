@@ -12,10 +12,9 @@ from django.conf import settings
 from django.test import TestCase
 from haystack import connections, reset_search_queries
 from haystack import indexes
-from haystack.inputs import AutoQuery
+from haystack.inputs import AutoQuery, AltParser
 from haystack.models import SearchResult
 from haystack.query import SearchQuerySet, RelatedSearchQuerySet, SQ
-from haystack.utils import log as logging
 from haystack.utils.loading import UnifiedIndex
 from core.models import (MockModel, AnotherMockModel,
                          AFourthMockModel, ASixthMockModel)
@@ -163,6 +162,16 @@ class SolrSpatialSearchIndex(indexes.SearchIndex, indexes.Indexable):
         return ASixthMockModel
 
 
+class SolrQuotingMockSearchIndex(indexes.SearchIndex, indexes.Indexable):
+    text = indexes.CharField(document=True, use_template=True)
+
+    def get_model(self):
+        return MockModel
+
+    def prepare_text(self, obj):
+        return u"""Don't panic but %s has been iñtërnâtiônàlizéð""" % obj.author
+
+
 class SolrSearchBackendTestCase(TestCase):
     def setUp(self):
         super(SolrSearchBackendTestCase, self).setUp()
@@ -179,6 +188,7 @@ class SolrSearchBackendTestCase(TestCase):
         self.ui.build(indexes=[self.smmi])
         connections['default']._index = self.ui
         self.sb = connections['default'].get_backend()
+        self.sq = connections['default'].get_query()
 
         self.sample_objs = []
 
@@ -358,6 +368,44 @@ class SolrSearchBackendTestCase(TestCase):
 
         # Restore.
         settings.HAYSTACK_LIMIT_TO_REGISTERED_MODELS = old_limit_to_registered_models
+
+    def test_altparser_query(self):
+        self.sb.update(self.smmi, self.sample_objs)
+
+        results = self.sb.search(AltParser('dismax', "daniel1", qf='name', mm=1).prepare(self.sq))
+        self.assertEqual(results['hits'], 1)
+
+        # This should produce exactly the same result since all we have are mockmodel instances but we simply
+        # want to confirm that using the AltParser doesn't break other options:
+        results = self.sb.search(AltParser('dismax', 'daniel1', qf='name', mm=1).prepare(self.sq),
+                                 narrow_queries=set(('django_ct:core.mockmodel', )))
+        self.assertEqual(results['hits'], 1)
+
+        results = self.sb.search(AltParser('dismax', '+indexed +daniel1', qf='text name', mm=1).prepare(self.sq))
+        self.assertEqual(results['hits'], 1)
+
+        self.sq.add_filter(SQ(name=AltParser('dismax', 'daniel1', qf='name', mm=1)))
+        self.sq.add_filter(SQ(text='indexed'))
+
+        new_q = self.sq._clone()
+        new_q._reset()
+
+        new_q.add_filter(SQ(name='daniel1'))
+        new_q.add_filter(SQ(text=AltParser('dismax', 'indexed', qf='text')))
+
+        results = new_q.get_results()
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].id, 'core.mockmodel.1')
+
+    def test_altparser_quoting(self):
+        test_objs = [
+            MockModel(id=1, author="Foo d'Bar", pub_date=datetime.date.today()),
+            MockModel(id=2, author="Baaz Quuz", pub_date=datetime.date.today()),
+        ]
+        self.sb.update(SolrQuotingMockSearchIndex(), test_objs)
+
+        results = self.sb.search(AltParser('dismax', "+don't +quuz", qf='text').prepare(self.sq))
+        self.assertEqual(results['hits'], 1)
 
     def test_more_like_this(self):
         self.sb.update(self.smmi, self.sample_objs)
@@ -998,32 +1046,44 @@ class LiveSolrMoreLikeThisTestCase(TestCase):
         super(LiveSolrMoreLikeThisTestCase, self).tearDown()
 
     def test_more_like_this(self):
-        mlt = self.sqs.more_like_this(MockModel.objects.get(pk=1))
-        self.assertEqual(mlt.count(), 22)
-        self.assertEqual([result.pk for result in mlt], ['14', '6', '10', '22', '4', '5', '3', '12', '2', '19', '18', '13', '15', '21', '7', '23', '20', '9', '1', '2', '17', '16'])
-        self.assertEqual(len([result.pk for result in mlt]), 22)
+        all_mlt = self.sqs.more_like_this(MockModel.objects.get(pk=1))
+        self.assertEqual(all_mlt.count(), len([result.pk for result in all_mlt]),
+                         msg="mlt SearchQuerySet .count() didn't match retrieved result length")
 
-        alt_mlt = self.sqs.filter(name='daniel3').more_like_this(MockModel.objects.get(pk=3))
-        self.assertEqual(alt_mlt.count(), 8)
-        self.assertEqual([result.pk for result in alt_mlt], ['17', '16', '19', '23', '22', '13', '1', '2'])
-        self.assertEqual(len([result.pk for result in alt_mlt]), 8)
+        # Rather than hard-code assumptions about Solr's return order, we have a few very similar
+        # items which we'll confirm are included in the first 5 results. This is still ugly as we're
+        # hard-coding primary keys but it's better than breaking any time a Solr update or data
+        # change causes a score to shift slightly
 
-        alt_mlt_with_models = self.sqs.models(MockModel).more_like_this(MockModel.objects.get(pk=1))
-        self.assertEqual(alt_mlt_with_models.count(), 20)
-        self.assertEqual([result.pk for result in alt_mlt_with_models], ['14', '6', '10', '22', '4', '5', '3', '12', '2', '19', '18', '13', '15', '21', '7', '23', '20', '9', '17', '16'])
-        self.assertEqual(len([result.pk for result in alt_mlt_with_models]), 20)
+        top_results = [int(result.pk) for result in all_mlt[:5]]
+        for i in (14, 6, 4, 22, 10):
+            self.assertIn(i, top_results)
 
-        if hasattr(MockModel.objects, 'defer'):
-            # Make sure MLT works with deferred bits.
-            mi = MockModel.objects.defer('foo').get(pk=1)
-            self.assertEqual(mi._deferred, True)
-            deferred = self.sqs.models(MockModel).more_like_this(mi)
-            self.assertEqual(deferred.count(), 0)
-            self.assertEqual([result.pk for result in deferred], [])
-            self.assertEqual(len([result.pk for result in deferred]), 0)
+        filtered_mlt = self.sqs.filter(name='daniel3').more_like_this(MockModel.objects.get(pk=3))
+        self.assertLess(filtered_mlt.count(), all_mlt.count())
+        top_filtered_results = [int(result.pk) for result in filtered_mlt[:5]]
+        for i in (23, 13, 17, 16, 19):
+            self.assertIn(i, top_filtered_results)
 
-        # Ensure that swapping the ``result_class`` works.
-        self.assertTrue(isinstance(self.sqs.result_class(MockSearchResult).more_like_this(MockModel.objects.get(pk=1))[0], MockSearchResult))
+        filtered_mlt_with_models = self.sqs.models(MockModel).more_like_this(MockModel.objects.get(pk=1))
+        self.assertLessEqual(filtered_mlt_with_models.count(), all_mlt.count())
+        top_filtered_with_models = [int(result.pk) for result in filtered_mlt_with_models[:5]]
+        for i in (14, 6, 4, 22, 10):
+            self.assertIn(i, top_filtered_with_models)
+
+    def test_more_like_this_defer(self):
+        mi = MockModel.objects.defer('foo').get(pk=1)
+        # FIXME: this currently is known to fail because haystack.utils.loading doesn't see the
+        #        MockModel_Deferred_foo class as registered:
+        deferred = self.sqs.models(MockModel).more_like_this(mi)
+        self.assertEqual(deferred.count(), 0)
+        self.assertEqual([result.pk for result in deferred], [])
+        self.assertEqual(len([result.pk for result in deferred]), 0)
+
+    def test_more_like_this_custom_result_class(self):
+        """Ensure that swapping the ``result_class`` works"""
+        first_result = self.sqs.result_class(MockSearchResult).more_like_this(MockModel.objects.get(pk=1))[0]
+        self.assertIsInstance(first_result, MockSearchResult)
 
 
 class LiveSolrAutocompleteTestCase(TestCase):

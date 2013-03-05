@@ -10,7 +10,7 @@ from haystack.models import SearchResult
 
 
 if settings.DEBUG:
-    from haystack.utils import log as logging
+    import logging
 
     class NullHandler(logging.Handler):
         def emit(self, record):
@@ -71,6 +71,7 @@ class SimpleSearchBackend(BaseSearchBackend):
                 hits += len(qs)
 
                 for match in qs:
+                    del(match.__dict__['score'])
                     result = result_class(match._meta.app_label, match._meta.module_name, match.pk, 0, **match.__dict__)
                     # For efficiency.
                     result._model = match.__class__
@@ -115,7 +116,7 @@ class SimpleSearchQuery(BaseSearchQuery):
 
                 term_list.append(value.prepare(self))
 
-        return (' ').join(term_list)
+        return (' ').join(map(str, term_list))
 
 
 class SimpleEngine(BaseEngine):
